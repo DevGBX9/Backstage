@@ -21,7 +21,6 @@
 package com.devgbx9.backstage.sim;
 
 import com.devgbx9.backstage.Backstage;
-import com.devgbx9.backstage.mixins.MinecraftServerTickInvoker;
 import com.devgbx9.backstage.state.ActiveChunk;
 import com.devgbx9.backstage.state.BackstageWorldState;
 
@@ -91,18 +90,18 @@ public final class SimulationEngine
 		boolean previousAutoSave = server.setAutoSave(false);
 		long startNanos = System.nanoTime();
 		long executed = 0L;
+		long gameTimeBefore = gameTime(server);
 		boolean completed = false;
 
 		try
 		{
-			MinecraftServerTickInvoker invoker = (MinecraftServerTickInvoker) server;
 			Backstage.LOGGER.info("[Backstage] Simulating {} ticks ({}) on {} active chunk(s)",
 					target, formatTicks(target), knownActiveChunkCount(server, state));
 
 			long budgetNanos = BackstageConfig.MAX_WALL_MILLIS * 1_000_000L;
 			for (long i = 0L; i < target; i++)
 			{
-				invoker.backstage$tickServer(() -> true);
+				tickLevels(server);
 				executed++;
 				if (i % BackstageConfig.BUDGET_CHECK_INTERVAL == 0 && System.nanoTime() - startNanos > budgetNanos)
 				{
@@ -125,12 +124,39 @@ public final class SimulationEngine
 		}
 
 		long wallMillis = (System.nanoTime() - startNanos) / 1_000_000L;
+		long gameTimeAfter = gameTime(server);
 		Result result = new Result(target, executed, wallMillis, completed);
-		Backstage.LOGGER.info("[Backstage] Simulated {} ticks in {} ms ({} ticks/s), {}",
+		Backstage.LOGGER.info("[Backstage] Simulated {} ticks in {} ms ({} ticks/s), world tick counter {} -> {} (+{}), {}",
 				result.executedTicks(), result.wallMillis(),
 				String.format("%.0f", result.ticksPerSecond()),
+				gameTimeBefore, gameTimeAfter, gameTimeAfter - gameTimeBefore,
 				result.completed() ? "completed" : "partial");
 		return result;
+	}
+
+	/**
+	 * Ticks the worlds directly instead of ticking the server.
+	 * An empty server pauses its worlds after a while (emptyTicks), which would silently skip the
+	 * whole catch-up, and nothing server level (players, network, autosave) matters during it anyway.
+	 */
+	private static void tickLevels(MinecraftServer server)
+	{
+		for (ServerLevel level : server.getAllLevels())
+		{
+			level.tick(() -> true);
+		}
+	}
+
+	private static long gameTime(MinecraftServer server)
+	{
+		try
+		{
+			return server.overworld().getLevelData().getGameTime();
+		}
+		catch (Throwable t)
+		{
+			return -1L;
+		}
 	}
 
 	private record ForcedChunk(ServerLevel level, int x, int z)
