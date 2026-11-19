@@ -53,7 +53,8 @@ def main():
 		f.write('| Subproject | For Minecraft | File | Size | SHA-256 |\n')
 		f.write('| --- | --- | --- | --- | --- |\n')
 
-		for subproject in settings['versions']:
+		# only the versions that are actually built are listed
+		for subproject in (settings.get('build_versions') or settings['versions']):
 			if len(target_subprojects) > 0 and subproject not in target_subprojects:
 				print('skipping {}'.format(subproject))
 				continue
@@ -63,6 +64,7 @@ def main():
 			file_paths = [fp for fp in sorted(file_paths) if all(not fp.endswith(f'-{classifier}.jar') for classifier in ['sources', 'dev', 'shadow'])]
 			if len(file_paths) == 0:
 				file_name = '*not found*'
+				file_size = '*N/A*'
 				sha256 = '*N/A*'
 			else:
 				file_name = '`{}`'.format(os.path.basename(file_paths[0]))

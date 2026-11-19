@@ -17,11 +17,14 @@ def main():
 	with open('settings.json') as f:
 		settings: dict = json.load(f)
 
+	# only the versions that are actually built are part of the matrix
+	build_versions = settings.get('build_versions') or settings['versions']
+
 	if len(target_subprojects) == 0:
-		subprojects = settings['versions']
+		subprojects = build_versions
 	else:
 		subprojects = []
-		for subproject in settings['versions']:
+		for subproject in build_versions:
 			if subproject in target_subprojects:
 				subprojects.append(subproject)
 				target_subprojects.remove(subproject)
