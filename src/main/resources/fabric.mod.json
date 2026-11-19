@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "${id}",
+  "version": "${version}",
+
+  "name": "${name}",
+  "description": "Backstage mod",
+  "authors": [
+    "DevGBX9"
+  ],
+  "contact": {
+    "homepage": "https://github.com/DevGBX9/Backstage",
+    "sources": "https://github.com/DevGBX9/Backstage"
+  },
+  "license": "LGPL-3.0",
+
+  "icon": "icon.png",
+
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.devgbx9.backstage.Backstage"
+    ]
+  },
+  "mixins": [
+    "backstage.mixins.json"
+  ],
+
+  "depends": {
+    "fabricloader": ">=0.11.4",
+    "minecraft": "${minecraft_dependency}"
+  }
+}
