@@ -2,7 +2,7 @@
  * This file is part of the Backstage project, licensed under the
  * GNU Lesser General Public License v3.0
  *
- * Copyright (C) 2023  Fallen_Breath and contributors
+ * Copyright (C) 2026  DevGBX9 and contributors
  *
  * Backstage is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -20,34 +20,16 @@
 
 package com.devgbx9.backstage.mixins;
 
-import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.MinecraftServer;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.gen.Invoker;
 
+import java.util.function.BooleanSupplier;
+
+/** Exposes {@code MinecraftServer#tickServer} so the catch-up simulation can run ticks on demand. */
 @Mixin(MinecraftServer.class)
-public abstract class MinecraftServerMixin
+public interface MinecraftServerTickInvoker
 {
-	@Inject(
-			//#if MC >= 1.16.0
-			//$$ method = "runServer",
-			//#else
-			method = "run",
-			//#endif
-			at = @At("HEAD")
-	)
-	private void onRun(CallbackInfo ci)
-	{
-		//#if MC >= 1.15.0
-		System.err.println("Hello world from mc11500 branch");
-		//#elseif MC >= 1.14.0
-		//$$ System.err.println("Hello world from mc11400 branch");
-		//#endif
-
-		CompoundTag nbt = new CompoundTag();
-		nbt.putString("key", "value");
-		System.err.println("nbt: " + nbt);
-	}
+	@Invoker("tickServer")
+	void backstage$tickServer(BooleanSupplier shouldKeepTicking);
 }

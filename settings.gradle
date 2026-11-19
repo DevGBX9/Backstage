@@ -27,7 +27,12 @@ pluginManagement {
 }
 
 def settings = new JsonSlurper().parseText(file('settings.json').text)
-for (String version : settings.versions) {
+
+// Only the versions listed in "build_versions" are built.
+// All other versions in "versions" are kept around for when they are enabled again.
+def buildVersions = settings.build_versions ?: settings.versions
+
+for (String version : buildVersions) {
 	include(":$version")
 
 	def proj = project(":$version")

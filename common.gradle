@@ -48,6 +48,8 @@ dependencies {
 		}
 	}
 	autoImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	// currently only the enabled versions are built, so a single fabric api dependency is enough
+	autoImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
 
 	// runtime mods
 //	if (mcVersion < 11904) {

@@ -4,7 +4,7 @@
   "package": "com.devgbx9.backstage.mixins",
   "compatibilityLevel": "{{COMPATIBILITY_LEVEL}}",
   "mixins": [
-    "MinecraftServerMixin"
+    "MinecraftServerTickInvoker"
   ],
   "client": [
   ],
