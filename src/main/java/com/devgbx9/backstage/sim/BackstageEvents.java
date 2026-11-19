@@ -21,6 +21,7 @@
 package com.devgbx9.backstage.sim;
 
 import com.devgbx9.backstage.Backstage;
+import com.devgbx9.backstage.net.BackstagePackets;
 import com.devgbx9.backstage.state.ActiveChunk;
 import com.devgbx9.backstage.state.BackstageWorldState;
 import com.devgbx9.backstage.state.WorldStateStore;
@@ -28,6 +29,7 @@ import com.devgbx9.backstage.state.WorldStateStore;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -43,7 +45,14 @@ public final class BackstageEvents
 {
 	private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
+	/** The loading screen needs a couple of ticks to reach the client before the server thread freezes. */
+	private static final long OVERLAY_LEAD_MILLIS = 100L;
+
 	private record Dwell(String dimension, int x, int z, int ticks)
+	{
+	}
+
+	private record PendingSimulation(long ticks, long runAtMillis)
 	{
 	}
 
@@ -51,6 +60,7 @@ public final class BackstageEvents
 
 	private static WorldStateStore store;
 	private static BackstageWorldState state;
+	private static PendingSimulation pending;
 
 	private BackstageEvents()
 	{
@@ -73,6 +83,23 @@ public final class BackstageEvents
 		return store;
 	}
 
+	/**
+	 * Asks for a manual catch-up run. The run itself starts a couple of ticks later, so the loading
+	 * screen reaches the clients before the server thread gets busy.
+	 *
+	 * @return false when another run is already on its way
+	 */
+	public static boolean requestSimulation(MinecraftServer server, long ticks)
+	{
+		if (pending != null || SimulationEngine.isRunning())
+		{
+			return false;
+		}
+		pending = new PendingSimulation(ticks, System.currentTimeMillis() + OVERLAY_LEAD_MILLIS);
+		BackstagePackets.broadcast(server, true, ticks);
+		return true;
+	}
+
 	private static String now()
 	{
 		return LocalDateTime.now().format(TIME_FORMAT);
@@ -81,6 +108,7 @@ public final class BackstageEvents
 	private static void onServerStarted(MinecraftServer server)
 	{
 		DWELLS.clear();
+		pending = null;
 		try
 		{
 			store = WorldStateStore.open(server);
@@ -147,6 +175,7 @@ public final class BackstageEvents
 		finally
 		{
 			DWELLS.clear();
+			pending = null;
 			store = null;
 			state = null;
 		}
@@ -158,6 +187,14 @@ public final class BackstageEvents
 		{
 			return;
 		}
+
+		if (pending != null && System.currentTimeMillis() >= pending.runAtMillis())
+		{
+			PendingSimulation request = pending;
+			pending = null;
+			runSimulation(server, request.ticks());
+		}
+
 		boolean changed = false;
 		for (ServerLevel level : server.getAllLevels())
 		{
@@ -169,6 +206,33 @@ public final class BackstageEvents
 		if (changed)
 		{
 			store.save(state);
+		}
+	}
+
+	private static void runSimulation(MinecraftServer server, long ticks)
+	{
+		try
+		{
+			SimulationEngine.Result result = SimulationEngine.run(server, ticks, state);
+			state.lastRequestedTicks = result.requestedTicks();
+			state.lastSimulatedTicks = result.executedTicks();
+			state.totalSimulatedTicks += result.executedTicks();
+			state.lastSimulatedAtMillis = System.currentTimeMillis();
+			store.save(state);
+
+			server.getPlayerList().broadcastSystemMessage(Component.literal(String.format(
+					"[Backstage] Done: %d ticks in %d ms (%s ticks/s)%s",
+					result.executedTicks(), result.wallMillis(),
+					String.format("%.0f", result.ticksPerSecond()),
+					result.completed() ? "" : ", partial (budget reached)")), false);
+		}
+		catch (Throwable t)
+		{
+			Backstage.LOGGER.error("[Backstage] Manual simulation crashed", t);
+		}
+		finally
+		{
+			BackstagePackets.broadcast(server, false, 0L);
 		}
 	}
 

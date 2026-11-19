@@ -21,6 +21,7 @@
 package com.devgbx9.backstage;
 
 import com.devgbx9.backstage.command.BackstageCommand;
+import com.devgbx9.backstage.net.BackstagePackets;
 import com.devgbx9.backstage.sim.BackstageEvents;
 
 import net.fabricmc.api.ModInitializer;
@@ -45,6 +46,7 @@ public class Backstage implements ModInitializer
 		MOD_NAME = metadata.getName();
 		MOD_VERSION = metadata.getVersion().getFriendlyString();
 
+		BackstagePackets.register();
 		BackstageEvents.register();
 		BackstageCommand.register();
 

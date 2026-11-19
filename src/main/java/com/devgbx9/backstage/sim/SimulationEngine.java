@@ -24,17 +24,40 @@ import com.devgbx9.backstage.Backstage;
 import com.devgbx9.backstage.state.ActiveChunk;
 import com.devgbx9.backstage.state.BackstageWorldState;
 
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.BlockEntityTicker;
+import net.minecraft.world.level.block.entity.BlockEntityType;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
+import net.minecraft.world.level.entity.EntityTypeTest;
+import net.minecraft.world.level.gamerules.GameRules;
+import net.minecraft.world.level.material.Fluid;
+import net.minecraft.world.level.storage.ServerLevelData;
 
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.BiConsumer;
 
 /**
- * Fast forwards the world by running real server ticks.
+ * Fast forwards the world by running real, vanilla block ticks, but only on the chunks that the
+ * mod considers active.
  * <p>
- * Only the chunks marked as active are force loaded before the run, so the rest of the world
- * is not even present in memory while the simulation happens.
+ * Instead of ticking whole levels (which would advance the entire world) every simulated tick does
+ * exactly what vanilla does for the active chunks: random ticks through {@link ServerLevel#tickChunk},
+ * scheduled block and fluid ticks, block entities and entities. Everything else is left untouched,
+ * so a one hour catch-up costs about the same as ticking two chunks for one hour, not a whole world.
  */
 public final class SimulationEngine
 {
@@ -63,7 +86,7 @@ public final class SimulationEngine
 	}
 
 	/**
-	 * Runs {@code ticks} server ticks as fast as the machine allows.
+	 * Runs {@code ticks} simulated ticks as fast as the machine allows.
 	 *
 	 * @return what actually happened, including the number of ticks really executed
 	 */
@@ -86,8 +109,9 @@ public final class SimulationEngine
 		}
 
 		running = true;
-		List<ForcedChunk> forced = forceActiveChunks(server, state);
 		boolean previousAutoSave = server.setAutoSave(false);
+		List<ForcedChunk> forced = new ArrayList<>();
+		List<LevelPlan> plans = new ArrayList<>();
 		long startNanos = System.nanoTime();
 		long executed = 0L;
 		long gameTimeBefore = gameTime(server);
@@ -95,22 +119,42 @@ public final class SimulationEngine
 
 		try
 		{
-			Backstage.LOGGER.info("[Backstage] Simulating {} ticks ({}) on {} active chunk(s)",
-					target, formatTicks(target), knownActiveChunkCount(server, state));
+			plans = prepare(server, state, forced);
 
-			long budgetNanos = BackstageConfig.MAX_WALL_MILLIS * 1_000_000L;
-			for (long i = 0L; i < target; i++)
+			if (plans.isEmpty())
 			{
-				tickLevels(server);
-				executed++;
-				if (i % BackstageConfig.BUDGET_CHECK_INTERVAL == 0 && System.nanoTime() - startNanos > budgetNanos)
-				{
-					Backstage.LOGGER.warn("[Backstage] Wall clock budget of {} ms reached after {} ticks, stopping",
-							BackstageConfig.MAX_WALL_MILLIS, executed);
-					break;
-				}
+				Backstage.LOGGER.warn("[Backstage] No active chunk could be loaded, nothing to simulate");
 			}
-			completed = executed >= target;
+			else
+			{
+				Backstage.LOGGER.info("[Backstage] Simulating {} ticks ({}) on {} active chunk(s) in {} dimension(s)",
+						target, formatTicks(target), countChunks(plans), plans.size());
+
+				long budgetNanos = BackstageConfig.MAX_WALL_MILLIS * 1_000_000L;
+				for (long i = 0L; i < target; i++)
+				{
+					for (LevelPlan plan : plans)
+					{
+						tickPlan(plan, i);
+					}
+					// the day and night cycle lives in the server clocks, one call per simulated tick keeps it in sync
+					server.clockManager().tick();
+					executed++;
+					if ((i & (BackstageConfig.BUDGET_CHECK_INTERVAL - 1)) == 0 && System.nanoTime() - startNanos > budgetNanos)
+					{
+						Backstage.LOGGER.warn("[Backstage] Wall clock budget of {} ms reached after {} ticks, stopping",
+								BackstageConfig.MAX_WALL_MILLIS, executed);
+						break;
+					}
+				}
+
+				// let the chunk system digest everything the simulation scheduled before the player continues
+				for (LevelPlan plan : plans)
+				{
+					plan.level().getChunkSource().tick(() -> true, false);
+				}
+				completed = executed >= target;
+			}
 		}
 		catch (Throwable t)
 		{
@@ -118,9 +162,9 @@ public final class SimulationEngine
 		}
 		finally
 		{
-			running = false;
-			releaseForcedChunks(server, forced);
+			releaseForcedChunks(forced);
 			server.setAutoSave(previousAutoSave);
+			running = false;
 		}
 
 		long wallMillis = (System.nanoTime() - startNanos) / 1_000_000L;
@@ -134,16 +178,105 @@ public final class SimulationEngine
 		return result;
 	}
 
-	/**
-	 * Ticks the worlds directly instead of ticking the server.
-	 * An empty server pauses its worlds after a while (emptyTicks), which would silently skip the
-	 * whole catch-up, and nothing server level (players, network, autosave) matters during it anyway.
-	 */
-	private static void tickLevels(MinecraftServer server)
+	private static long countChunks(List<LevelPlan> plans)
 	{
-		for (ServerLevel level : server.getAllLevels())
+		long total = 0L;
+		for (LevelPlan plan : plans)
 		{
-			level.tick(() -> true);
+			total += plan.chunks().size();
+		}
+		return total;
+	}
+
+	/** One tick of a single dimension, limited to its active chunks. */
+	private static void tickPlan(LevelPlan plan, long tickIndex)
+	{
+		ServerLevel level = plan.level();
+
+		long gameTime = level.getLevelData().getGameTime() + 1L;
+		((ServerLevelData) level.getLevelData()).setGameTime(gameTime);
+
+		int randomTickSpeed = level.getGameRules().get(GameRules.RANDOM_TICK_SPEED);
+		for (LevelChunk chunk : plan.chunks())
+		{
+			level.tickChunk(chunk, randomTickSpeed);
+		}
+
+		level.getBlockTicks().tick(gameTime, BackstageConfig.MAX_SCHEDULED_TICKS, plan.blockTicker());
+		level.getFluidTicks().tick(gameTime, BackstageConfig.MAX_SCHEDULED_TICKS, plan.fluidTicker());
+
+		for (LevelChunk chunk : plan.chunks())
+		{
+			tickBlockEntities(level, chunk);
+		}
+
+		tickEntities(level, plan, tickIndex);
+	}
+
+	private static void tickBlockEntities(ServerLevel level, LevelChunk chunk)
+	{
+		if (chunk.getBlockEntities().isEmpty())
+		{
+			return;
+		}
+		for (BlockEntity blockEntity : new ArrayList<>(chunk.getBlockEntities().values()))
+		{
+			if (blockEntity.isRemoved())
+			{
+				continue;
+			}
+			tickBlockEntity(level, blockEntity, blockEntity.getBlockState());
+		}
+	}
+
+	@SuppressWarnings({"unchecked", "rawtypes"})
+	private static void tickBlockEntity(ServerLevel level, BlockEntity blockEntity, BlockState state)
+	{
+		BlockEntityTicker<BlockEntity> ticker = (BlockEntityTicker<BlockEntity>) state.getTicker(level, (BlockEntityType) blockEntity.getType());
+		if (ticker != null)
+		{
+			ticker.tick(level, blockEntity.getBlockPos(), state, blockEntity);
+		}
+	}
+
+	private static void tickEntities(ServerLevel level, LevelPlan plan, long tickIndex)
+	{
+		if (tickIndex % BackstageConfig.ENTITY_REFRESH_TICKS == 0L)
+		{
+			plan.entities().clear();
+			level.getEntities(EntityTypeTest.forClass(Entity.class),
+					entity -> plan.positions().contains(entity.chunkPosition().pack()), plan.entities());
+		}
+		for (Entity entity : plan.entities())
+		{
+			if (entity.isRemoved() || entity instanceof ServerPlayer)
+			{
+				continue;
+			}
+			if (!plan.positions().contains(entity.chunkPosition().pack()) || entity.getVehicle() != null)
+			{
+				continue;
+			}
+			level.tickNonPassenger(entity);
+		}
+	}
+
+	/** Copies the vanilla private handlers, they are not reachable from outside the level. */
+	private static void tickBlock(ServerLevel level, BlockPos pos, Block type)
+	{
+		BlockState state = level.getBlockState(pos);
+		if (state.is(type))
+		{
+			state.tick(level, pos, level.getRandom());
+		}
+	}
+
+	private static void tickFluid(ServerLevel level, BlockPos pos, Fluid type)
+	{
+		BlockState state = level.getBlockState(pos);
+		if (state.getFluidState().is(type))
+		{
+			state.getFluidState().tick(level, pos, state);
 		}
 	}
 
@@ -163,37 +296,82 @@ public final class SimulationEngine
 	{
 	}
 
-	private static long knownActiveChunkCount(MinecraftServer server, BackstageWorldState state)
+	private record LevelPlan(ServerLevel level, List<LevelChunk> chunks, Set<Long> positions, List<Entity> entities,
+			BiConsumer<BlockPos, Block> blockTicker, BiConsumer<BlockPos, Fluid> fluidTicker)
 	{
-		return state.activeChunks.stream().filter(chunk -> resolveLevel(server, chunk) != null).count();
 	}
 
-	private static List<ForcedChunk> forceActiveChunks(MinecraftServer server, BackstageWorldState state)
+	/**
+	 * Force loads exactly the active chunks and resolves them to real {@link LevelChunk}s.
+	 * Anything that cannot be resolved is skipped instead of quietly ticking the whole world.
+	 */
+	private static List<LevelPlan> prepare(MinecraftServer server, BackstageWorldState state, List<ForcedChunk> forced)
 	{
-		List<ForcedChunk> forced = new ArrayList<>();
+		Map<ServerLevel, List<ActiveChunk>> byLevel = new LinkedHashMap<>();
 		for (ActiveChunk chunk : state.activeChunks)
 		{
 			ServerLevel level = resolveLevel(server, chunk);
 			if (level == null)
 			{
+				Backstage.LOGGER.warn("[Backstage] Ignoring active chunk in unknown dimension {}", chunk);
 				continue;
 			}
-			try
+			byLevel.computeIfAbsent(level, ignored -> new ArrayList<>()).add(chunk);
+		}
+
+		List<LevelPlan> plans = new ArrayList<>();
+		for (Map.Entry<ServerLevel, List<ActiveChunk>> entry : byLevel.entrySet())
+		{
+			ServerLevel level = entry.getKey();
+			for (ActiveChunk chunk : entry.getValue())
 			{
-				if (level.setChunkForced(chunk.x, chunk.z, true))
+				try
 				{
-					forced.add(new ForcedChunk(level, chunk.x, chunk.z));
+					if (level.setChunkForced(chunk.x, chunk.z, true))
+					{
+						forced.add(new ForcedChunk(level, chunk.x, chunk.z));
+					}
+				}
+				catch (Throwable t)
+				{
+					Backstage.LOGGER.warn("[Backstage] Could not force load {}", chunk, t);
 				}
 			}
-			catch (Throwable t)
+
+			// pushes the new tickets through the distance manager and loads the chunks right away
+			level.getChunkSource().tick(() -> true, false);
+
+			List<LevelChunk> chunks = new ArrayList<>();
+			Set<Long> positions = new HashSet<>();
+			for (ActiveChunk chunk : entry.getValue())
 			{
-				Backstage.LOGGER.warn("[Backstage] Could not force load {}", chunk, t);
+				try
+				{
+					ChunkAccess access = level.getChunk(chunk.x, chunk.z, ChunkStatus.FULL, true);
+					if (access instanceof LevelChunk levelChunk)
+					{
+						chunks.add(levelChunk);
+						positions.add(levelChunk.getPos().pack());
+					}
+				}
+				catch (Throwable t)
+				{
+					Backstage.LOGGER.warn("[Backstage] Could not load {}", chunk, t);
+				}
 			}
+
+			if (chunks.isEmpty())
+			{
+				continue;
+			}
+			plans.add(new LevelPlan(level, chunks, positions, new ArrayList<>(),
+					(pos, block) -> tickBlock(level, pos, block),
+					(pos, fluid) -> tickFluid(level, pos, fluid)));
 		}
-		return forced;
+		return plans;
 	}
 
-	private static void releaseForcedChunks(MinecraftServer server, List<ForcedChunk> forced)
+	private static void releaseForcedChunks(List<ForcedChunk> forced)
 	{
 		for (ForcedChunk chunk : forced)
 		{

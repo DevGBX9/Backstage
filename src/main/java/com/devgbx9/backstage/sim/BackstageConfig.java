@@ -45,6 +45,12 @@ public final class BackstageConfig
 	/** How often (in ticks) the loop checks the wall clock budget. */
 	public static final int BUDGET_CHECK_INTERVAL = 64;
 
+	/** Upper bound of scheduled block or fluid ticks processed in a single simulated tick, like vanilla. */
+	public static final int MAX_SCHEDULED_TICKS = 65536;
+
+	/** How often (in simulated ticks) the engine rescans the entities of the active chunks. */
+	public static final int ENTITY_REFRESH_TICKS = 20;
+
 	/** Ticks longer than this are considered the result of a system clock change and ignored. */
 	public static final long MAX_TRUSTED_GAP_MILLIS = 30L * 24L * 60L * 60L * 1000L;
 

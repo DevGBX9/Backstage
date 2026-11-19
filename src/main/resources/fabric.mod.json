@@ -20,6 +20,9 @@
   "entrypoints": {
     "main": [
       "com.devgbx9.backstage.Backstage"
+    ],
+    "client": [
+      "com.devgbx9.backstage.client.BackstageClient"
     ]
   },
   "mixins": [

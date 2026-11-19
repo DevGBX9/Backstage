@@ -139,27 +139,18 @@ public final class BackstageCommand
 			source.sendFailure(Component.literal("[Backstage] No world state loaded yet"));
 			return 0;
 		}
-		if (SimulationEngine.isRunning())
+		if (state.activeChunks.isEmpty())
+		{
+			source.sendFailure(Component.literal("[Backstage] No active chunks to simulate"));
+			return 0;
+		}
+		long ticks = (long) seconds * BackstageConfig.TICKS_PER_SECOND;
+		if (!BackstageEvents.requestSimulation(source.getServer(), ticks))
 		{
 			source.sendFailure(Component.literal("[Backstage] A simulation is already running"));
 			return 0;
 		}
-		long ticks = (long) seconds * BackstageConfig.TICKS_PER_SECOND;
-		source.sendSuccess(() -> Component.literal("[Backstage] Simulating " + SimulationEngine.formatTicks(ticks) + " (" + ticks + " ticks)..."), false);
-		SimulationEngine.Result result = SimulationEngine.run(source.getServer(), ticks, state);
-		state.lastRequestedTicks = result.requestedTicks();
-		state.lastSimulatedTicks = result.executedTicks();
-		state.totalSimulatedTicks += result.executedTicks();
-		state.lastSimulatedAtMillis = System.currentTimeMillis();
-		if (BackstageEvents.store() != null)
-		{
-			BackstageEvents.store().save(state);
-		}
-		source.sendSuccess(() -> Component.literal(String.format("[Backstage] Done: %d ticks in %d ms (%s ticks/s)%s",
-				result.executedTicks(), result.wallMillis(),
-				String.format("%.0f", result.ticksPerSecond()),
-				result.completed() ? "" : ", partial (budget reached)")), false);
-		Backstage.LOGGER.info("[Backstage] Manual simulation by {}: {} ticks", source.getTextName(), result.executedTicks());
+		Backstage.LOGGER.info("[Backstage] Manual simulation by {}: {} ticks requested", source.getTextName(), ticks);
 		return 1;
 	}
 }
