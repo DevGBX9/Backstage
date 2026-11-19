@@ -21,6 +21,7 @@
 package com.devgbx9.backstage.sim;
 
 import com.devgbx9.backstage.Backstage;
+import com.devgbx9.backstage.mixins.ServerLevelInvoker;
 import com.devgbx9.backstage.state.ActiveChunk;
 import com.devgbx9.backstage.state.BackstageWorldState;
 
@@ -41,6 +42,9 @@ import net.minecraft.world.level.entity.EntityTypeTest;
 import net.minecraft.world.level.gamerules.GameRules;
 import net.minecraft.world.level.material.Fluid;
 import net.minecraft.world.level.storage.ServerLevelData;
+import net.minecraft.world.ticks.LevelChunkTicks;
+import net.minecraft.world.ticks.ScheduledTick;
+import net.minecraft.world.ticks.TickContainerAccess;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -202,8 +206,17 @@ public final class SimulationEngine
 			level.tickChunk(chunk, randomTickSpeed);
 		}
 
-		level.getBlockTicks().tick(gameTime, BackstageConfig.MAX_SCHEDULED_TICKS, plan.blockTicker());
-		level.getFluidTicks().tick(gameTime, BackstageConfig.MAX_SCHEDULED_TICKS, plan.fluidTicker());
+		// Scheduled ticks live inside the chunk they belong to. Draining them here instead of going
+		// through the level keeps redstone, observers and fluids running even for chunks the level
+		// would consider idle (no player nearby, entities not loaded yet).
+		for (LevelChunk chunk : plan.chunks())
+		{
+			drainTicks(chunk.getBlockTicks(), gameTime, (pos, block) -> tickBlock(level, pos, block));
+			drainTicks(chunk.getFluidTicks(), gameTime, (pos, fluid) -> tickFluid(level, pos, fluid));
+		}
+
+		// pistons, dispensers, note blocks and chests only do their work here
+		((ServerLevelInvoker) level).backstage$runBlockEvents();
 
 		for (LevelChunk chunk : plan.chunks())
 		{
@@ -261,6 +274,22 @@ public final class SimulationEngine
 		}
 	}
 
+	/**
+	 * Runs every scheduled tick of one chunk that is due, in vanilla order, with the vanilla budget.
+	 */
+	@SuppressWarnings("unchecked")
+	private static <T> void drainTicks(TickContainerAccess<T> access, long gameTime, BiConsumer<BlockPos, T> output)
+	{
+		LevelChunkTicks<T> ticks = (LevelChunkTicks<T>) access;
+		int budget = BackstageConfig.MAX_SCHEDULED_TICKS;
+		ScheduledTick<T> tick;
+		while (budget-- > 0 && (tick = ticks.peek()) != null && tick.triggerTick() <= gameTime)
+		{
+			ticks.poll();
+			output.accept(tick.pos(), tick.type());
+		}
+	}
+
 	/** Copies the vanilla private handlers, they are not reachable from outside the level. */
 	private static void tickBlock(ServerLevel level, BlockPos pos, Block type)
 	{
@@ -296,8 +325,7 @@ public final class SimulationEngine
 	{
 	}
 
-	private record LevelPlan(ServerLevel level, List<LevelChunk> chunks, Set<Long> positions, List<Entity> entities,
-			BiConsumer<BlockPos, Block> blockTicker, BiConsumer<BlockPos, Fluid> fluidTicker)
+	private record LevelPlan(ServerLevel level, List<LevelChunk> chunks, Set<Long> positions, List<Entity> entities)
 	{
 	}
 
@@ -350,6 +378,8 @@ public final class SimulationEngine
 					ChunkAccess access = level.getChunk(chunk.x, chunk.z, ChunkStatus.FULL, true);
 					if (access instanceof LevelChunk levelChunk)
 					{
+						// make sure ticks scheduled inside this chunk are kept by the level instead of being dropped
+						levelChunk.registerTickContainerInLevel(level);
 						chunks.add(levelChunk);
 						positions.add(levelChunk.getPos().pack());
 					}
@@ -364,9 +394,7 @@ public final class SimulationEngine
 			{
 				continue;
 			}
-			plans.add(new LevelPlan(level, chunks, positions, new ArrayList<>(),
-					(pos, block) -> tickBlock(level, pos, block),
-					(pos, fluid) -> tickFluid(level, pos, fluid)));
+			plans.add(new LevelPlan(level, chunks, positions, new ArrayList<>()));
 		}
 		return plans;
 	}

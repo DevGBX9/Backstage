@@ -4,6 +4,7 @@
   "package": "com.devgbx9.backstage.mixins",
   "compatibilityLevel": "{{COMPATIBILITY_LEVEL}}",
   "mixins": [
+    "ServerLevelInvoker"
   ],
   "client": [
   ],
